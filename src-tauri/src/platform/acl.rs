@@ -176,14 +176,87 @@ mod acl_tests {
     use windows::core::{PCWSTR, PWSTR};
     use windows::Win32::Foundation::{LocalFree, HLOCAL};
     use windows::Win32::Security::Authorization::{
-        ConvertSecurityDescriptorToStringSecurityDescriptorW, GetNamedSecurityInfoW,
-        SDDL_REVISION_1, SE_FILE_OBJECT,
+        ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+        GetNamedSecurityInfoW, SDDL_REVISION_1, SE_FILE_OBJECT,
     };
-    use windows::Win32::Security::{DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR};
+    use windows::Win32::Security::{
+        GetAce, GetSecurityDescriptorControl, GetSecurityDescriptorDacl, ACCESS_ALLOWED_ACE,
+        ACE_HEADER, ACL, DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, PSID, SE_DACL_PROTECTED,
+    };
 
-    fn read_dacl_sddl(path: &Path) -> String {
+    const ACCESS_ALLOWED_ACE_TYPE_U8: u8 = 0;
+    const OBJECT_INHERIT_ACE_U8: u8 = 0x01;
+    const CONTAINER_INHERIT_ACE_U8: u8 = 0x02;
+    const INHERITED_ACE_U8: u8 = 0x10;
+    const FILE_ALL_ACCESS_MASK: u32 = 0x001F_01FF;
+
+    #[derive(Debug, Clone, PartialEq, Eq)]
+    struct ExplicitAceInfo {
+        ace_type: u8,
+        ace_flags: u8,
+        mask: u32,
+        sid: String,
+    }
+
+    #[derive(Debug)]
+    struct InspectedDacl {
+        is_protected: bool,
+        aces: Vec<ExplicitAceInfo>,
+    }
+
+    unsafe fn psid_to_numeric_string(psid: PSID) -> String {
+        let mut sid_ptr = PWSTR::null();
+        ConvertSidToStringSidW(psid, &mut sid_ptr)
+            .expect("ConvertSidToStringSidW debe convertir PSID binario a forma numérica S-1-...");
+        let mut len = 0usize;
+        while *sid_ptr.0.add(len) != 0 {
+            len += 1;
+        }
+        let text = String::from_utf16_lossy(std::slice::from_raw_parts(sid_ptr.0, len));
+        let _ = LocalFree(Some(HLOCAL(sid_ptr.0 as *mut std::ffi::c_void)));
+        text
+    }
+
+    unsafe fn extract_aces_from_sd(sd: PSECURITY_DESCRIPTOR, dacl_ptr: *const ACL) -> InspectedDacl {
+        let mut control = 0u16;
+        let mut revision = 0u32;
+        GetSecurityDescriptorControl(sd, &mut control, &mut revision)
+            .expect("GetSecurityDescriptorControl debe leer flags del descriptor");
+        let is_protected = (control & SE_DACL_PROTECTED.0) != 0;
+
+        assert!(
+            !dacl_ptr.is_null(),
+            "El descriptor de seguridad debe contener una DACL no nula"
+        );
+        let ace_count = u32::from((*dacl_ptr).AceCount);
+        let mut aces = Vec::with_capacity(ace_count as usize);
+
+        for idx in 0..ace_count {
+            let mut ace_raw: *mut std::ffi::c_void = std::ptr::null_mut();
+            GetAce(dacl_ptr, idx, &mut ace_raw).expect("GetAce debe obtener cada ACE de la DACL");
+            let header = &*(ace_raw as *const ACE_HEADER);
+            assert_eq!(
+                header.AceType, ACCESS_ALLOWED_ACE_TYPE_U8,
+                "Solo se esperan ACEs de tipo ACCESS_ALLOWED en la DACL endurecida"
+            );
+
+            let allowed = &*(ace_raw as *const ACCESS_ALLOWED_ACE);
+            let sid_ptr = PSID(std::ptr::addr_of!(allowed.SidStart) as *mut std::ffi::c_void);
+            aces.push(ExplicitAceInfo {
+                ace_type: header.AceType,
+                ace_flags: header.AceFlags,
+                mask: allowed.Mask,
+                sid: psid_to_numeric_string(sid_ptr),
+            });
+        }
+
+        InspectedDacl { is_protected, aces }
+    }
+
+    fn inspect_path_dacl(path: &Path) -> InspectedDacl {
         let wide = path.as_os_str().encode_wide_null();
         unsafe {
+            let mut dacl_ptr: *mut ACL = std::ptr::null_mut();
             let mut sd = PSECURITY_DESCRIPTOR::default();
             GetNamedSecurityInfoW(
                 PCWSTR(wide.as_ptr()),
@@ -191,31 +264,16 @@ mod acl_tests {
                 DACL_SECURITY_INFORMATION,
                 None,
                 None,
-                None,
+                Some(&mut dacl_ptr),
                 None,
                 &mut sd,
             )
             .ok()
-            .expect("GetNamedSecurityInfoW debe leer DACL");
+            .expect("GetNamedSecurityInfoW debe leer la DACL binaria del objeto");
 
-            let mut sddl_ptr = PWSTR::null();
-            ConvertSecurityDescriptorToStringSecurityDescriptorW(
-                sd,
-                SDDL_REVISION_1,
-                DACL_SECURITY_INFORMATION,
-                &mut sddl_ptr,
-                None,
-            )
-            .expect("ConvertSecurityDescriptorToStringSecurityDescriptorW debe convertir SDDL");
-
-            let mut len = 0usize;
-            while *sddl_ptr.0.add(len) != 0 {
-                len += 1;
-            }
-            let text = String::from_utf16_lossy(std::slice::from_raw_parts(sddl_ptr.0, len));
-            let _ = LocalFree(Some(HLOCAL(sddl_ptr.0 as *mut std::ffi::c_void)));
+            let inspected = extract_aces_from_sd(sd, dacl_ptr);
             let _ = LocalFree(Some(HLOCAL(sd.0)));
-            text
+            inspected
         }
     }
 
@@ -232,12 +290,110 @@ mod acl_tests {
         harden_directory_acl(&temp_dir);
         harden_vault_db_files(&db_file);
 
-        let dir_sddl = read_dacl_sddl(&temp_dir);
-        let file_sddl = read_dacl_sddl(&db_file);
+        // Nota sobre runners de GitHub Actions (Windows Server 2025):
+        // El job corre bajo `runneradmin`, que es la cuenta integrada RID 500 (`S-1-5-21-<maquina>-500`).
+        // `ConvertSecurityDescriptorToStringSecurityDescriptorW` abrevia ese SID numérico como el alias
+        // SDDL `LA` (`SDDL_LOCAL_ADMIN`), haciendo fallar comparaciones ingenuas de texto sobre la SDDL.
+        // Inspeccionamos la DACL binaria (`GetAce` + `ConvertSidToStringSidW` sobre cada `PSID`) para
+        // verificar semánticamente los SIDs reales sin depender de alias SDDL.
+        let dir_dacl = inspect_path_dacl(&temp_dir);
+        let file_dacl = inspect_path_dacl(&db_file);
 
-        assert!(dir_sddl.contains(&sid), "SDDL de directorio debe incluir TokenUser SID: {dir_sddl}");
-        assert!(!dir_sddl.contains(";;;OW)"), "SDDL no debe depender de OWNER RIGHTS (OW): {dir_sddl}");
-        assert!(file_sddl.contains(&sid), "SDDL de archivo debe incluir TokenUser SID: {file_sddl}");
+        assert!(
+            dir_dacl.is_protected,
+            "La DACL del directorio debe tener SE_DACL_PROTECTED activo: {dir_dacl:?}"
+        );
+        assert!(
+            file_dacl.is_protected,
+            "La DACL de vault.db debe tener SE_DACL_PROTECTED activo: {file_dacl:?}"
+        );
+
+        let expected_dir_flags = OBJECT_INHERIT_ACE_U8 | CONTAINER_INHERIT_ACE_U8;
+        assert!(
+            dir_dacl.aces.iter().any(|ace| {
+                ace.sid == sid
+                    && ace.mask == FILE_ALL_ACCESS_MASK
+                    && (ace.ace_flags & expected_dir_flags) == expected_dir_flags
+                    && (ace.ace_flags & INHERITED_ACE_U8) == 0
+            }),
+            "La DACL del directorio debe otorgar FILE_ALL_ACCESS explícito con herencia OICI a TokenUser ({sid}): {dir_dacl:?}"
+        );
+        assert!(
+            dir_dacl
+                .aces
+                .iter()
+                .any(|ace| ace.sid == "S-1-5-18" && ace.mask == FILE_ALL_ACCESS_MASK),
+            "La DACL del directorio debe incluir acceso explícito para SYSTEM (S-1-5-18): {dir_dacl:?}"
+        );
+
+        assert!(
+            file_dacl.aces.iter().any(|ace| {
+                ace.sid == sid
+                    && ace.mask == FILE_ALL_ACCESS_MASK
+                    && (ace.ace_flags & INHERITED_ACE_U8) == 0
+            }),
+            "La DACL de vault.db debe otorgar FILE_ALL_ACCESS explícito a TokenUser ({sid}): {file_dacl:?}"
+        );
+        assert!(
+            file_dacl
+                .aces
+                .iter()
+                .any(|ace| ace.sid == "S-1-5-18" && ace.mask == FILE_ALL_ACCESS_MASK),
+            "La DACL de vault.db debe incluir acceso explícito para SYSTEM (S-1-5-18): {file_dacl:?}"
+        );
+
+        // Ninguna ACE puede depender de OWNER RIGHTS (S-1-3-4 / OW) ni abrir acceso a grupos amplios
+        let forbidden_sids = [
+            "S-1-3-4",      // OWNER RIGHTS (OW)
+            "S-1-1-0",      // Everyone (WD)
+            "S-1-5-11",     // Authenticated Users (AU)
+            "S-1-5-32-545", // BUILTIN\Users (BU)
+        ];
+        for dacl in [&dir_dacl, &file_dacl] {
+            for ace in &dacl.aces {
+                assert!(
+                    !forbidden_sids.contains(&ace.sid.as_str()),
+                    "SID no permitido detectado en DACL: {ace:?}"
+                );
+                assert!(
+                    ace.sid == sid || ace.sid == "S-1-5-18" || ace.sid == "S-1-5-32-544",
+                    "ACE inesperada fuera de {{TokenUser, SYSTEM, Administrators}}: {ace:?}"
+                );
+            }
+        }
+
+        // Regresión explícita para el alias SDDL `LA` (`SDDL_LOCAL_ADMIN`, RID 500 en GitHub Actions):
+        // verifica que el inspector binario resuelve `LA` a su SID numérico `S-1-5-21-...-500`.
+        unsafe {
+            let runner_like_sddl: Vec<u16> = "D:PAI(A;OICI;FA;;;SY)(A;OICI;FA;;;LA)\0"
+                .encode_utf16()
+                .collect();
+            let mut sd = PSECURITY_DESCRIPTOR::default();
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                PCWSTR(runner_like_sddl.as_ptr()),
+                SDDL_REVISION_1,
+                &mut sd,
+                None,
+            )
+            .expect("Debe parsear SDDL con alias LA de Windows Server");
+
+            let mut dacl_present = false.into();
+            let mut dacl_defaulted = false.into();
+            let mut dacl_ptr: *mut ACL = std::ptr::null_mut();
+            GetSecurityDescriptorDacl(sd, &mut dacl_present, &mut dacl_ptr, &mut dacl_defaulted)
+                .expect("GetSecurityDescriptorDacl debe extraer DACL");
+            assert!(dacl_present.as_bool());
+
+            let parsed = extract_aces_from_sd(sd, dacl_ptr);
+            assert!(
+                parsed
+                    .aces
+                    .iter()
+                    .any(|ace| ace.sid.starts_with("S-1-5-21-") && ace.sid.ends_with("-500")),
+                "El alias SDDL 'LA' debe resolverse al SID numérico RID 500 de administrador local: {parsed:?}"
+            );
+            let _ = LocalFree(Some(HLOCAL(sd.0)));
+        }
 
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
