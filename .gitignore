@@ -1,0 +1,33 @@
+# Rust / Tauri
+src-tauri/target/
+src-tauri/gen/
+**/*.rs.bk
+
+# Node
+node_modules/
+dist/
+dist-ssr/
+*.local
+
+# Vite
+vite.config.*.timestamp-*
+
+# Build outputs
+src-tauri/target/release/bundle/
+
+# Datos de la bóveda — NUNCA se suben
+*.db
+*.db-shm
+*.db-wal
+*.aegisvault
+
+# Entorno / secretos
+.env
+.env.*
+
+# Sistema / editores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log

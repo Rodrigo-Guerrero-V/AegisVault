@@ -1,0 +1,52 @@
+[package]
+name = "aegis-vault"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "aegis_vault_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2.0", features = [] }
+
+[dependencies]
+tauri = { version = "2.2", features = [] }
+tauri-plugin-dialog = "2.2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1.43", features = ["sync", "time", "rt-multi-thread"] }
+
+# Criptografía e higiene de memoria
+argon2 = "0.5"
+aes-gcm = "0.10"
+hkdf = "0.12"
+hmac = "0.12"
+sha1 = "0.10"
+sha2 = "0.10"
+blake3 = "1.5"
+rand = "0.8"
+subtle = "2.6"
+zeroize = { version = "1.8", features = ["derive"] }
+unicode-normalization = "0.1"
+
+# Persistencia e identificadores
+rusqlite = { version = "0.33", features = ["bundled"] }
+uuid = { version = "1.12", features = ["v4", "serde"] }
+tracing = "0.1"
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.59"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_Security_Cryptography",
+    "Win32_System_DataExchange",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+    "Win32_System_Power",
+    "Win32_System_RemoteDesktop",
+    "Win32_UI_WindowsAndMessaging",
+]
