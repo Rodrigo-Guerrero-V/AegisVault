@@ -30,23 +30,23 @@ Gestor de contraseñas de escritorio para Windows. **Local-first y zero-knowledg
 
 ## Instalación y verificación de integridad
 
-Descarga el instalador y `SHA256SUMS.txt` desde [Releases](../../releases): `AegisVault_0.1.0_x64-setup.exe` (NSIS) o `AegisVault_0.1.0_x64_en-US.msi` (WiX).
+Descarga el instalador y `SHA256SUMS.txt` desde [Releases](../../releases): `AegisVault_0.1.1_x64-setup.exe` (NSIS) o `AegisVault_0.1.1_x64_en-US.msi` (WiX).
 
 > **Importante:** Nunca omitas advertencias de Windows SmartScreen a ciegas sin verificar antes el hash SHA-256 y la atestación criptográfica de procedencia SLSA generada por GitHub Actions:
 
 1. **Verificar hash SHA-256 (`SHA256SUMS.txt`):**
    ```powershell
-   Get-FileHash -Algorithm SHA256 .\AegisVault_0.1.0_x64-setup.exe
+   Get-FileHash -Algorithm SHA256 .\AegisVault_0.1.1_x64-setup.exe
    Get-Content .\SHA256SUMS.txt
    ```
 2. **Verificar procedencia de compilación SLSA ([GitHub CLI `gh`](https://cli.github.com/)):**
    ```powershell
-   gh attestation verify .\AegisVault_0.1.0_x64-setup.exe --repo Rodrigo-Guerrero-V/AegisVault
-   gh attestation verify .\AegisVault_0.1.0_x64_en-US.msi --repo Rodrigo-Guerrero-V/AegisVault
+   gh attestation verify .\AegisVault_0.1.1_x64-setup.exe --repo Rodrigo-Guerrero-V/AegisVault
+   gh attestation verify .\AegisVault_0.1.1_x64_en-US.msi --repo Rodrigo-Guerrero-V/AegisVault
    ```
 3. **Verificar firma Authenticode (cuando el certificado de código esté activo en CI):**
    ```powershell
-   Get-AuthenticodeSignature .\AegisVault_0.1.0_x64-setup.exe | Format-List Status, SignerCertificate
+   Get-AuthenticodeSignature .\AegisVault_0.1.1_x64-setup.exe | Format-List Status, SignerCertificate
    ```
 
 > **Mantenimiento de Releases:** se recomienda activar *Immutable Releases* en GitHub (*Settings → General → Releases → Enable release immutability*) y configurar los secretos `WINDOWS_CERTIFICATE` (PFX en Base64) y `WINDOWS_CERTIFICATE_PASSWORD` para el firmado Authenticode automático en `.github/workflows/release.yml`.
