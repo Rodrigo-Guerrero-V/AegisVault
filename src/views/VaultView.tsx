@@ -1,8 +1,7 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import {
   Copy,
   CreditCard,
-  PenLine,
   Eye,
   EyeOff,
   FileText,
@@ -11,12 +10,14 @@ import {
   Globe,
   KeyRound,
   Lock,
+  PenLine,
   Plus,
   Search,
   Settings,
   Shield,
   Star,
   Trash2,
+  TriangleAlert,
   WandSparkles,
 } from "lucide-react";
 import { ItemEditorDrawer } from "../components/ItemEditorDrawer";
@@ -33,18 +34,34 @@ import {
 } from "../ipc/types";
 import { SettingsSecurityView } from "./SettingsSecurityView";
 
-type SidebarFilter =
+interface Props {
+  onCopied?: (field: string, expiresInSecs: number) => void;
+}
+
+type NavFilter =
   | { kind: "all" }
   | { kind: "favorites" }
   | { kind: "type"; itemType: ItemType }
   | { kind: "folder"; folderId: string }
   | { kind: "settings" };
 
-export function VaultView() {
-  const [nav, setNav] = useState<SidebarFilter>({ kind: "all" });
+type PendingDelete =
+  | { kind: "item"; id: string; label: string }
+  | { kind: "folder"; id: string; label: string };
+
+function formatTotpCode(code: string): string {
+  if (code.length === 8) {
+    return `${code.slice(0, 4)} ${code.slice(4)}`;
+  }
+  return `${code.slice(0, 3)} ${code.slice(3)}`;
+}
+
+export function VaultView({ onCopied }: Props) {
+  const [nav, setNav] = useState<NavFilter>({ kind: "all" });
   const [search, setSearch] = useState("");
   const [folders, setFolders] = useState<FolderDto[]>([]);
   const [items, setItems] = useState<CachedItemOverview[]>([]);
+  const [corruptedCount, setCorruptedCount] = useState(0);
 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [detail, setDetail] = useState<ItemDetailDto | null>(null);
@@ -53,83 +70,82 @@ export function VaultView() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [editingTarget, setEditingTarget] = useState<ItemDetailDto | null>(null);
   const [generatorOpen, setGeneratorOpen] = useState(false);
+
   const [newFolderName, setNewFolderName] = useState("");
   const [addingFolder, setAddingFolder] = useState(false);
+  const [pendingDelete, setPendingDelete] = useState<PendingDelete | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const loadIndex = useCallback(async () => {
+    if (nav.kind === "settings") return;
     try {
-      const dto = await vaultCommands.listVaultIndex({
+      const res = await vaultCommands.listVaultIndex({
         search_query: search || null,
         folder_id: nav.kind === "folder" ? nav.folderId : null,
         item_type: nav.kind === "type" ? nav.itemType : null,
       });
-      setFolders(dto.folders);
+      setFolders(res.folders);
+      setCorruptedCount(res.corrupted_count);
       const filtered =
         nav.kind === "favorites"
-          ? dto.items_overview.filter((i) => i.favorite)
-          : dto.items_overview;
+          ? res.items_overview.filter((i) => i.favorite)
+          : res.items_overview;
       setItems(filtered);
     } catch (err) {
       setError(parseVaultError(err).message);
     }
-  }, [search, nav]);
+  }, [nav, search]);
 
   useEffect(() => {
     void loadIndex();
   }, [loadIndex]);
 
-  const totpReloadingRef = useRef(false);
-
   const loadSelectedDetail = useCallback(async (id: string) => {
+    setError(null);
     try {
-      const full = await vaultCommands.getItemDetail(id);
-      setDetail(full);
+      const d = await vaultCommands.getItemDetail(id);
+      setDetail(d);
     } catch (err) {
       setError(parseVaultError(err).message);
-    } finally {
-      totpReloadingRef.current = false;
     }
   }, []);
 
   useEffect(() => {
     setRevealSecret(false);
-    if (selectedId && nav.kind !== "settings") {
-      void loadSelectedDetail(selectedId);
-    } else {
+    if (!selectedId) {
       setDetail(null);
+      return;
     }
-  }, [selectedId, nav.kind, loadSelectedDetail]);
+    void loadSelectedDetail(selectedId);
+  }, [selectedId, loadSelectedDetail]);
 
-  // Reloj reactivo para TOTP (cuenta regresiva local + recarga de código al cruzar ventana de 30s)
+  // Refresca el contador regresivo TOTP cada segundo si el ítem abierto posee semilla 2FA
   useEffect(() => {
-    if (!detail?.current_totp || !selectedId) return;
+    if (!detail || detail.secret.kind !== "login" || !detail.secret.totp_uri || !selectedId) {
+      return;
+    }
     const timer = window.setInterval(() => {
-      setDetail((prev) => {
-        if (!prev || !prev.current_totp) return prev;
-        if (prev.current_totp.remaining_secs <= 1) {
-          if (!totpReloadingRef.current) {
-                totpReloadingRef.current = true;
-                void loadSelectedDetail(prev.id);
-          }
-          return prev;
-        }
-        return {
-          ...prev,
-          current_totp: {
-            ...prev.current_totp,
-            remaining_secs: prev.current_totp.remaining_secs - 1,
-          },
-        };
-      });
+      void loadSelectedDetail(selectedId);
     }, 1000);
     return () => window.clearInterval(timer);
-  }, [detail?.id, detail?.current_totp !== null, selectedId, loadSelectedDetail]);
+  }, [detail, selectedId, loadSelectedDetail]);
+
+  // Registra actividad de usuario ante interacción para el temporizador de bloqueo en Rust
+  useEffect(() => {
+    const ping = () => void vaultCommands.recordUserActivity();
+    window.addEventListener("keydown", ping);
+    window.addEventListener("mousedown", ping);
+    return () => {
+      window.removeEventListener("keydown", ping);
+      window.removeEventListener("mousedown", ping);
+    };
+  }, []);
 
   const copySecure = async (field: CopyableField) => {
     if (!detail) return;
     try {
-      await vaultCommands.copyItemField(detail.id, field);
+      const out = await vaultCommands.copyItemField(detail.id, field);
+      onCopied?.(field, out.expires_in_secs);
     } catch (err) {
       setError(parseVaultError(err).message);
     }
@@ -143,6 +159,26 @@ export function VaultView() {
       setNewFolderName("");
       setAddingFolder(false);
       await loadIndex();
+    } catch (err) {
+      setError(parseVaultError(err).message);
+    }
+  };
+
+  const confirmDeleteAction = async () => {
+    if (!pendingDelete) return;
+    const target = pendingDelete;
+    setPendingDelete(null);
+    try {
+      if (target.kind === "item") {
+        await vaultCommands.deleteItem(target.id);
+        if (selectedId === target.id) {
+          setSelectedId(null);
+        }
+        await loadIndex();
+      } else {
+        await vaultCommands.deleteFolder(target.id);
+        setNav({ kind: "all" });
+      }
     } catch (err) {
       setError(parseVaultError(err).message);
     }
@@ -293,7 +329,7 @@ export function VaultView() {
                 <Search
                   size={15}
                   color="var(--text-muted)"
-                  style={{ position: "absolute", left: 11, top: 11 }}
+                  style={{ position: "absolute", left: 11, top: 13 }}
                 />
                 <input
                   className="text-input"
@@ -307,13 +343,13 @@ export function VaultView() {
                 <button
                   className="btn btn-danger"
                   title="Eliminar carpeta (conserva los ítems)"
-                  onClick={async () => {
-                    try {
-                      await vaultCommands.deleteFolder(nav.folderId);
-                      setNav({ kind: "all" });
-                    } catch (err) {
-                      setError(parseVaultError(err).message);
-                    }
+                  onClick={() => {
+                    const folderObj = folders.find((f) => f.id === nav.folderId);
+                    setPendingDelete({
+                      kind: "folder",
+                      id: nav.folderId,
+                      label: folderObj?.name ?? "esta carpeta",
+                    });
                   }}
                 >
                   <Trash2 size={15} />
@@ -337,10 +373,26 @@ export function VaultView() {
                       {iconForType(item.item_type)}
                     </div>
                     <div style={{ minWidth: 0, flex: 1 }}>
-                      <div style={{ fontWeight: 600, fontSize: 13.5, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <div
+                        style={{
+                          fontWeight: 600,
+                          fontSize: 13.5,
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
                         {item.title}
                       </div>
-                      <div style={{ fontSize: 12, color: "var(--text-secondary)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      <div
+                        style={{
+                          fontSize: 12,
+                          color: "var(--text-secondary)",
+                          overflow: "hidden",
+                          textOverflow: "ellipsis",
+                          whiteSpace: "nowrap",
+                        }}
+                      >
                         {item.subtitle || "—"}
                       </div>
                     </div>
@@ -353,6 +405,18 @@ export function VaultView() {
 
           {/* Panel derecho de detalle con descifrado puntual */}
           <main className="detail-pane">
+            {corruptedCount > 0 && (
+              <div className="alert-box alert-warn" style={{ display: "flex", gap: 10 }}>
+                <TriangleAlert size={18} style={{ flexShrink: 0, marginTop: 2 }} />
+                <div>
+                  <strong>Alerta de integridad AEAD:</strong> {corruptedCount} registro(s) en{" "}
+                  <code>vault.db</code> no superaron la verificación criptográfica y fueron aislados.
+                  Puedes exportar tus registros intactos desde{" "}
+                  <strong>Seguridad y Respaldo</strong>.
+                </div>
+              </div>
+            )}
+
             {error && <div className="alert-box alert-error">{error}</div>}
 
             {!detail ? (
@@ -361,7 +425,14 @@ export function VaultView() {
               </div>
             ) : (
               <div style={{ maxWidth: 620 }}>
-                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22 }}>
+                <div
+                  style={{
+                    display: "flex",
+                    justifyContent: "space-between",
+                    alignItems: "flex-start",
+                    marginBottom: 22,
+                  }}
+                >
                   <div>
                     <h2 style={{ margin: "0 0 4px" }}>{detail.overview.title}</h2>
                     <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
@@ -381,15 +452,15 @@ export function VaultView() {
                     </button>
                     <button
                       className="btn btn-danger"
-                      onClick={async () => {
-                        try {
-                          await vaultCommands.deleteItem(detail.id);
-                          setSelectedId(null);
-                          await loadIndex();
-                        } catch (err) {
-                          setError(parseVaultError(err).message);
-                        }
-                      }}
+                      title="Eliminar registro"
+                      aria-label="Eliminar registro"
+                      onClick={() =>
+                        setPendingDelete({
+                          kind: "item",
+                          id: detail.id,
+                          label: detail.overview.title,
+                        })
+                      }
                     >
                       <Trash2 size={15} />
                     </button>
@@ -430,6 +501,12 @@ export function VaultView() {
                       </div>
                     </div>
 
+                    {detail.totp_error && (
+                      <div className="alert-box alert-error">
+                        Semilla 2FA inválida: {detail.totp_error}
+                      </div>
+                    )}
+
                     {detail.current_totp && (
                       <div className="secret-field-card">
                         <div>
@@ -445,7 +522,7 @@ export function VaultView() {
                               letterSpacing: "0.18em",
                             }}
                           >
-                            {detail.current_totp.code.slice(0, 3)} {detail.current_totp.code.slice(3)}
+                            {formatTotpCode(detail.current_totp.code)}
                           </div>
                         </div>
                         <button className="btn btn-secondary" onClick={() => void copySecure("totp")}>
@@ -457,9 +534,15 @@ export function VaultView() {
 
                     {detail.overview.urls.length > 0 && (
                       <div className="secret-field-card" style={{ display: "block" }}>
-                        <div className="field-label" style={{ marginBottom: 6 }}>Sitios vinculados</div>
+                        <div className="field-label" style={{ marginBottom: 6 }}>
+                          Sitios vinculados
+                        </div>
                         {detail.overview.urls.map((u) => (
-                          <div key={u} className="mono" style={{ fontSize: 12.5, color: "var(--text-secondary)" }}>
+                          <div
+                            key={u}
+                            className="mono"
+                            style={{ fontSize: 12.5, color: "var(--text-secondary)" }}
+                          >
                             {u}
                           </div>
                         ))}
@@ -468,8 +551,12 @@ export function VaultView() {
 
                     {detail.secret.notes && (
                       <div className="secret-field-card" style={{ display: "block" }}>
-                        <div className="field-label" style={{ marginBottom: 6 }}>Notas</div>
-                        <div style={{ whiteSpace: "pre-wrap", fontSize: 13 }}>{detail.secret.notes}</div>
+                        <div className="field-label" style={{ marginBottom: 6 }}>
+                          Notas
+                        </div>
+                        <div style={{ whiteSpace: "pre-wrap", fontSize: 13 }}>
+                          {detail.secret.notes}
+                        </div>
                       </div>
                     )}
 
@@ -496,13 +583,18 @@ export function VaultView() {
                   <>
                     <div className="secret-field-card">
                       <div>
-                        <div className="field-label">Número de tarjeta ({detail.secret.cardholder_name})</div>
+                        <div className="field-label">
+                          Número de tarjeta ({detail.secret.cardholder_name})
+                        </div>
                         <div className="mono">
                           {revealSecret ? detail.secret.card_number : detail.overview.subtitle}
                         </div>
                       </div>
                       <div style={{ display: "flex", gap: 6 }}>
-                        <button className="btn btn-secondary" onClick={() => setRevealSecret((v) => !v)}>
+                        <button
+                          className="btn btn-secondary"
+                          onClick={() => setRevealSecret((v) => !v)}
+                        >
                           {revealSecret ? <EyeOff size={14} /> : <Eye size={14} />}
                         </button>
                         <button className="btn btn-primary" onClick={() => void copySecure("card_number")}>
@@ -525,12 +617,76 @@ export function VaultView() {
                         Copiar CVV
                       </button>
                     </div>
+
+                    {detail.secret.pin && (
+                      <div className="secret-field-card">
+                        <div>
+                          <div className="field-label">PIN de tarjeta</div>
+                          <div className="mono">{revealSecret ? detail.secret.pin : "••••"}</div>
+                        </div>
+                        <button className="btn btn-secondary" onClick={() => void copySecure("pin")}>
+                          <Copy size={14} />
+                          Copiar PIN
+                        </button>
+                      </div>
+                    )}
+
+                    {detail.secret.notes && (
+                      <div className="secret-field-card" style={{ display: "block" }}>
+                        <div className="field-label" style={{ marginBottom: 6 }}>
+                          Notas
+                        </div>
+                        <div style={{ whiteSpace: "pre-wrap", fontSize: 13 }}>
+                          {detail.secret.notes}
+                        </div>
+                      </div>
+                    )}
                   </>
                 )}
               </div>
             )}
           </main>
         </>
+      )}
+
+      {/* Confirmación obligatoria antes de borrado destructivo (PRAGMA secure_delete = ON) */}
+      {pendingDelete && (
+        <div className="modal-backdrop" onClick={() => setPendingDelete(null)}>
+          <div className="modal-panel" style={{ maxWidth: 430 }} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0, marginBottom: 8 }}>Confirmar eliminación permanente</h3>
+            <p style={{ fontSize: 13.5, color: "var(--text-secondary)", marginTop: 0 }}>
+              {pendingDelete.kind === "item" ? (
+                <>
+                  ¿Eliminar definitivamente el registro <strong>{pendingDelete.label}</strong>?{" "}
+                  SQLite sobrescribirá sus sectores cifrados (<code>secure_delete = ON</code>) y no
+                  podrá deshacerse.
+                </>
+              ) : (
+                <>
+                  ¿Eliminar la carpeta <strong>{pendingDelete.label}</strong>? Los ítems asociados
+                  se conservarán en tu bóveda sin carpeta asignada.
+                </>
+              )}
+            </p>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginTop: 18 }}>
+              <button
+                type="button"
+                className="btn btn-secondary"
+                onClick={() => setPendingDelete(null)}
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="btn btn-danger"
+                onClick={() => void confirmDeleteAction()}
+              >
+                <Trash2 size={14} />
+                Eliminar permanentemente
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       <ItemEditorDrawer

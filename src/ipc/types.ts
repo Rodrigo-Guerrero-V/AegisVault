@@ -8,6 +8,9 @@ export type ErrorCode =
   | "CONSENT_REQUIRED"
   | "VALIDATION_ERROR"
   | "BACKUP_CORRUPTED"
+  | "DATA_CORRUPTED"
+  | "RATE_LIMITED"
+  | "DIALOG_CANCELLED"
   | "INTERNAL_ERROR";
 
 export interface VaultError {
@@ -37,6 +40,7 @@ export interface VaultSessionInfo {
   lock_timeout_secs: number;
   clipboard_ttl_secs: number;
   hello_enabled: boolean;
+  capture_protection_enabled: boolean;
 }
 
 export interface SecurityPrefsDto {
@@ -44,6 +48,7 @@ export interface SecurityPrefsDto {
   clipboard_ttl_secs: number;
   hello_enabled: boolean;
   hello_available: boolean;
+  capture_protection_enabled: boolean;
 }
 
 export interface FolderDto {
@@ -66,6 +71,7 @@ export interface CachedItemOverview {
 export interface VaultIndexDto {
   folders: FolderDto[];
   items_overview: CachedItemOverview[];
+  corrupted_count: number;
 }
 
 export interface OverviewPayload {
@@ -107,6 +113,8 @@ export type SecretPayload =
 export interface TotpCodeDto {
   code: string;
   remaining_secs: number;
+  digits: number;
+  period: number;
 }
 
 export interface ItemDetailDto {
@@ -117,6 +125,7 @@ export interface ItemDetailDto {
   overview: OverviewPayload;
   secret: SecretPayload;
   current_totp: TotpCodeDto | null;
+  totp_error: string | null;
   created_at: number;
   updated_at: number;
 }
@@ -144,9 +153,20 @@ export interface GeneratedPasswordDto {
   entropy_bits: number;
 }
 
+export interface SelectedBackupFileDto {
+  file_name: string;
+  size_bytes: number;
+}
+
+export interface ExportBackupOutput {
+  skipped_corrupted: number;
+}
+
 export interface ImportBackupStatsDto {
   folders_imported: number;
   items_imported: number;
+  folders_skipped: number;
+  items_skipped: number;
 }
 
 export function parseVaultError(err: unknown): VaultError {

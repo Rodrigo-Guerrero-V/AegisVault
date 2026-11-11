@@ -142,6 +142,12 @@ impl ClipboardGuard {
     }
 }
 
+impl Default for ClipboardGuard {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Drop for ClipboardGuard {
     fn drop(&mut self) {
         let _ = self.purge_if_matching_generation(None, None);

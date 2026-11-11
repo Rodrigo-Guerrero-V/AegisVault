@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { KeyRound, Save, WandSparkles, X } from "lucide-react";
+import { Eye, EyeOff, KeyRound, Save, WandSparkles, X } from "lucide-react";
 import { vaultCommands } from "../ipc/commands";
 import {
   parseVaultError,
@@ -52,6 +52,11 @@ export function ItemEditorDrawer({
   const [cvv, setCvv] = useState("");
   const [cardPin, setCardPin] = useState("");
 
+  // Controles de enmascaramiento de secretos en edición
+  const [showPassword, setShowPassword] = useState(false);
+  const [showCvv, setShowCvv] = useState(false);
+  const [showPin, setShowPin] = useState(false);
+
   const [genOpen, setGenOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -59,6 +64,9 @@ export function ItemEditorDrawer({
   useEffect(() => {
     if (!open) return;
     setError(null);
+    setShowPassword(false);
+    setShowCvv(false);
+    setShowPin(false);
 
     if (editingItem) {
       setItemType(editingItem.item_type);
@@ -274,12 +282,22 @@ export function ItemEditorDrawer({
               <div style={{ display: "flex", gap: 8 }}>
                 <input
                   className="text-input mono"
-                  type="text"
+                  type={showPassword ? "text" : "password"}
                   required={itemType === "login"}
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   autoComplete="off"
+                  spellCheck={false}
                 />
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => setShowPassword((v) => !v)}
+                  title={showPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
+                  aria-label={showPassword ? "Ocultar contraseña" : "Mostrar contraseña"}
+                >
+                  {showPassword ? <EyeOff size={16} /> : <Eye size={16} />}
+                </button>
                 <button
                   type="button"
                   className="btn btn-secondary"
@@ -293,13 +311,14 @@ export function ItemEditorDrawer({
             </div>
 
             <div className="field-group">
-              <label className="field-label">Semilla TOTP 2FA (Base32 o URI otpauth://)</label>
+              <label className="field-label">Semilla TOTP 2FA (Base32 o URI otpauth://totp/...)</label>
               <input
                 className="text-input mono"
                 value={totpUri}
                 onChange={(e) => setTotpUri(e.target.value)}
                 placeholder="JBSWY3DPEHPK3PXP..."
                 autoComplete="off"
+                spellCheck={false}
               />
             </div>
 
@@ -347,6 +366,7 @@ export function ItemEditorDrawer({
                 className="text-input"
                 value={cardholder}
                 onChange={(e) => setCardholder(e.target.value)}
+                autoComplete="off"
               />
             </div>
             <div className="field-group">
@@ -356,25 +376,83 @@ export function ItemEditorDrawer({
                 value={cardNumber}
                 onChange={(e) => setCardNumber(e.target.value)}
                 autoComplete="off"
+                spellCheck={false}
               />
             </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 10 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "84px 96px 1fr 1fr", gap: 10 }}>
               <div className="field-group">
                 <label className="field-label">Mes</label>
-                <input className="text-input" value={expMonth} onChange={(e) => setExpMonth(e.target.value)} />
+                <input
+                  className="text-input"
+                  value={expMonth}
+                  onChange={(e) => setExpMonth(e.target.value)}
+                  autoComplete="off"
+                />
               </div>
               <div className="field-group">
                 <label className="field-label">Año</label>
-                <input className="text-input" value={expYear} onChange={(e) => setExpYear(e.target.value)} />
+                <input
+                  className="text-input"
+                  value={expYear}
+                  onChange={(e) => setExpYear(e.target.value)}
+                  autoComplete="off"
+                />
               </div>
               <div className="field-group">
                 <label className="field-label">CVV</label>
-                <input className="text-input mono" value={cvv} onChange={(e) => setCvv(e.target.value)} />
+                <div style={{ display: "flex", gap: 6 }}>
+                  <input
+                    className="text-input mono"
+                    type={showCvv ? "text" : "password"}
+                    value={cvv}
+                    onChange={(e) => setCvv(e.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ padding: "8px 10px" }}
+                    onClick={() => setShowCvv((v) => !v)}
+                    aria-label={showCvv ? "Ocultar CVV" : "Mostrar CVV"}
+                  >
+                    {showCvv ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
               </div>
               <div className="field-group">
                 <label className="field-label">PIN</label>
-                <input className="text-input mono" value={cardPin} onChange={(e) => setCardPin(e.target.value)} />
+                <div style={{ display: "flex", gap: 6 }}>
+                  <input
+                    className="text-input mono"
+                    type={showPin ? "text" : "password"}
+                    value={cardPin}
+                    onChange={(e) => setCardPin(e.target.value)}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <button
+                    type="button"
+                    className="btn btn-secondary"
+                    style={{ padding: "8px 10px" }}
+                    onClick={() => setShowPin((v) => !v)}
+                    aria-label={showPin ? "Ocultar PIN" : "Mostrar PIN"}
+                  >
+                    {showPin ? <EyeOff size={15} /> : <Eye size={15} />}
+                  </button>
+                </div>
               </div>
+            </div>
+
+            <div className="field-group">
+              <label className="field-label">Notas privadas</label>
+              <textarea
+                className="text-area"
+                rows={2}
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="Teléfono de bloqueo bancario, límites, etc."
+              />
             </div>
           </>
         )}

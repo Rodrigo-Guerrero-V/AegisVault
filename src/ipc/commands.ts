@@ -2,6 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type {
   CachedItemOverview,
   CopyableField,
+  ExportBackupOutput,
   FolderDto,
   GeneratedPasswordDto,
   ImportBackupStatsDto,
@@ -10,6 +11,7 @@ import type {
   PasswordGenOptions,
   SaveItemInput,
   SecurityPrefsDto,
+  SelectedBackupFileDto,
   VaultIndexDto,
   VaultSessionInfo,
   VaultStatusDto,
@@ -40,9 +42,17 @@ export const vaultCommands = {
 
   getSecurityPrefs: () => invoke<SecurityPrefsDto>("get_security_prefs"),
 
-  updateSecurityPrefs: (lock_timeout_secs: number, clipboard_ttl_secs: number) =>
+  updateSecurityPrefs: (
+    lock_timeout_secs: number,
+    clipboard_ttl_secs: number,
+    capture_protection_enabled: boolean
+  ) =>
     invoke<void>("update_security_prefs", {
-      input: { lock_timeout_secs, clipboard_ttl_secs },
+      input: {
+        lock_timeout_secs,
+        clipboard_ttl_secs,
+        capture_protection_enabled,
+      },
     }),
 
   changeMasterPassword: (current_password: string, new_password: string) =>
@@ -93,32 +103,33 @@ export const vaultCommands = {
 
   clearClipboardNow: () => invoke<void>("clear_clipboard_now"),
 
+  selectRestoreBackupFile: () =>
+    invoke<SelectedBackupFileDto>("select_restore_backup_file"),
+
   exportEncryptedBackup: (
     master_password: string,
     backup_password: string,
-    dest_path: string
+    skip_corrupted = false
   ) =>
-    invoke<void>("export_encrypted_backup", {
-      input: { master_password, backup_password, dest_path },
+    invoke<ExportBackupOutput>("export_encrypted_backup", {
+      input: { master_password, backup_password, skip_corrupted },
     }),
 
   restoreEncryptedBackup: (
-    source_path: string,
     backup_password: string,
     new_master_password: string,
     ack_no_recovery: boolean
   ) =>
     invoke<VaultSessionInfo>("restore_encrypted_backup", {
       input: {
-        source_path,
         backup_password,
         new_master_password,
         ack_no_recovery,
       },
     }),
 
-  importEncryptedBackup: (source_path: string, backup_password: string) =>
+  importEncryptedBackup: (backup_password: string) =>
     invoke<ImportBackupStatsDto>("import_encrypted_backup", {
-      input: { source_path, backup_password },
+      input: { backup_password },
     }),
 };

@@ -7,7 +7,7 @@ use crate::crypto::{
     aad::{folder_aad, item_overview_aad, item_secret_aad},
     aead::{decrypt_with_aad, encrypt_with_aad},
     memory::ProtectedKey,
-    totp::{generate_current_totp, TotpCodeDto},
+    totp::{generate_current_totp, validate_totp_input, TotpCodeDto},
 };
 use crate::db::{
     repo::{
@@ -21,8 +21,10 @@ use crate::error::{VaultError, VaultResult};
 use crate::state::{AppState, CachedItemOverview, UnlockedSession};
 
 const MAX_PASSWORD_HISTORY: usize = 20;
+const MAX_TITLE_BYTES: usize = 512;
+const MAX_FIELD_BYTES: usize = 262_144; // 256 KiB por campo
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OverviewPayload {
     pub title: String,
     pub subtitle: String,
@@ -30,7 +32,28 @@ pub struct OverviewPayload {
     pub tags: Vec<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+impl Zeroize for OverviewPayload {
+    fn zeroize(&mut self) {
+        self.title.zeroize();
+        self.subtitle.zeroize();
+        for u in &mut self.urls {
+            u.zeroize();
+        }
+        self.urls.clear();
+        for t in &mut self.tags {
+            t.zeroize();
+        }
+        self.tags.clear();
+    }
+}
+
+impl Drop for OverviewPayload {
+    fn drop(&mut self) {
+        self.zeroize();
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PasswordHistoryEntry {
     pub password: String,
     pub changed_at: i64,
@@ -49,7 +72,7 @@ impl Drop for PasswordHistoryEntry {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SecretPayload {
     Login {
@@ -80,6 +103,58 @@ impl SecretPayload {
             SecretPayload::Login { .. } => "login",
             SecretPayload::Note { .. } => "note",
             SecretPayload::Card { .. } => "card",
+        }
+    }
+
+    /// Compara contenido funcional ignorando diferencias de `password_history` para deduplicación.
+    pub fn content_eq(&self, other: &Self) -> bool {
+        match (self, other) {
+            (
+                SecretPayload::Login {
+                    username: u1,
+                    password: p1,
+                    totp_uri: t1,
+                    notes: n1,
+                    ..
+                },
+                SecretPayload::Login {
+                    username: u2,
+                    password: p2,
+                    totp_uri: t2,
+                    notes: n2,
+                    ..
+                },
+            ) => u1 == u2 && p1 == p2 && t1 == t2 && n1 == n2,
+            (SecretPayload::Note { body: b1 }, SecretPayload::Note { body: b2 }) => b1 == b2,
+            (
+                SecretPayload::Card {
+                    cardholder_name: ch1,
+                    card_number: cn1,
+                    exp_month: em1,
+                    exp_year: ey1,
+                    cvv: cv1,
+                    pin: pn1,
+                    notes: nt1,
+                },
+                SecretPayload::Card {
+                    cardholder_name: ch2,
+                    card_number: cn2,
+                    exp_month: em2,
+                    exp_year: ey2,
+                    cvv: cv2,
+                    pin: pn2,
+                    notes: nt2,
+                },
+            ) => {
+                ch1 == ch2
+                    && cn1 == cn2
+                    && em1 == em2
+                    && ey1 == ey2
+                    && cv1 == cv2
+                    && pn1 == pn2
+                    && nt1 == nt2
+            }
+            _ => false,
         }
     }
 }
@@ -156,6 +231,7 @@ pub struct ListVaultIndexInput {
 pub struct VaultIndexDto {
     pub folders: Vec<FolderDto>,
     pub items_overview: Vec<CachedItemOverview>,
+    pub corrupted_count: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -167,6 +243,7 @@ pub struct ItemDetailDto {
     pub overview: OverviewPayload,
     pub secret: SecretPayload,
     pub current_totp: Option<TotpCodeDto>,
+    pub totp_error: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
 }
@@ -195,8 +272,15 @@ pub fn hydrate_session_index(
         Ok((list_raw_folders(conn)?, list_raw_item_overviews(conn)?))
     })?;
 
-    session.folders_cache.clear();
-    session.items_cache.clear();
+    for (mut k, mut v) in session.folders_cache.drain() {
+        k.zeroize();
+        v.zeroize();
+    }
+    for (mut k, mut v) in session.items_cache.drain() {
+        k.zeroize();
+        v.zeroize();
+    }
+    let mut corrupted = 0usize;
 
     for f in raw_folders {
         let aad = folder_aad(CURRENT_SCHEMA_VERSION, &f.id);
@@ -208,13 +292,14 @@ pub fn hydrate_session_index(
         )
         .and_then(|plain| {
             String::from_utf8(plain.to_vec())
-                .map_err(|_| VaultError::internal("UTF-8 inválido en carpeta"))
+                .map_err(|_| VaultError::data_corrupted("UTF-8 inválido en carpeta"))
         }) {
             Ok(name) => {
                 session.folders_cache.insert(f.id, name);
             }
             Err(err) => {
-                tracing::warn!("Omitiendo carpeta corrupta id={}: {}", f.id, err);
+                corrupted += 1;
+                tracing::warn!("Carpeta corrupta detectada id={}: {}", f.id, err);
             }
         }
     }
@@ -229,7 +314,7 @@ pub fn hydrate_session_index(
         )
         .and_then(|plain| {
             serde_json::from_slice::<OverviewPayload>(&plain)
-                .map_err(|_| VaultError::internal("JSON overview inválido"))
+                .map_err(|_| VaultError::data_corrupted("JSON overview inválido"))
         });
 
         match parsed {
@@ -241,34 +326,38 @@ pub fn hydrate_session_index(
                         folder_id: row.folder_id,
                         item_type: row.item_type,
                         favorite: row.favorite,
-                        title: ov.title,
-                        subtitle: ov.subtitle,
-                        urls: ov.urls,
-                        tags: ov.tags,
+                        title: ov.title.clone(),
+                        subtitle: ov.subtitle.clone(),
+                        urls: ov.urls.clone(),
+                        tags: ov.tags.clone(),
                         updated_at: row.updated_at,
                     },
                 );
             }
             Err(err) => {
-                tracing::warn!("Omitiendo ítem corrupto id={}: {}", row.id, err);
+                corrupted += 1;
+                tracing::warn!("Ítem corrupto detectado id={}: {}", row.id, err);
             }
         }
     }
 
+    session.corrupted_count = corrupted;
     Ok(())
 }
 
 pub fn decrypt_item_secret(
     secret_key: &ProtectedKey,
+    schema_version: u32,
     item_id: &str,
     item_type: &str,
     nonce: &[u8],
     ciphertext: &[u8],
 ) -> VaultResult<SecretPayload> {
-    let aad = item_secret_aad(CURRENT_SCHEMA_VERSION, item_id, item_type);
-    let plain = decrypt_with_aad(secret_key, nonce, ciphertext, &aad)?;
+    let aad = item_secret_aad(schema_version, item_id, item_type);
+    let plain = decrypt_with_aad(secret_key, nonce, ciphertext, &aad)
+        .map_err(|_| VaultError::data_corrupted("El contenido cifrado del ítem falló la verificación AEAD."))?;
     serde_json::from_slice(&plain)
-        .map_err(|_| VaultError::internal("Payload secreto corrupto o incompatible."))
+        .map_err(|_| VaultError::data_corrupted("Payload secreto corrupto o incompatible."))
 }
 
 #[tauri::command]
@@ -285,7 +374,7 @@ pub fn list_vault_index(
                 name: name.clone(),
             })
             .collect();
-        folders.sort_by(|a, b| a.name.to_lowercase().cmp(&b.name.to_lowercase()));
+        folders.sort_by_key(|a| a.name.to_lowercase());
 
         let query_norm = input
             .search_query
@@ -331,6 +420,7 @@ pub fn list_vault_index(
         Ok(VaultIndexDto {
             folders,
             items_overview,
+            corrupted_count: session.corrupted_count,
         })
     })
 }
@@ -349,26 +439,31 @@ pub fn get_item_detail(state: State<'_, AppState>, item_id: String) -> VaultResu
             &raw.overview_nonce,
             &raw.overview_ciphertext,
             &ov_aad,
-        )?;
+        )
+        .map_err(|_| VaultError::data_corrupted("El encabezado del ítem no superó la verificación AEAD."))?;
         let overview: OverviewPayload = serde_json::from_slice(&ov_plain)
-            .map_err(|_| VaultError::internal("Overview JSON inválido."))?;
+            .map_err(|_| VaultError::data_corrupted("Overview JSON inválido."))?;
 
         let secret = decrypt_item_secret(
             &session.subkeys.secret_key,
+            CURRENT_SCHEMA_VERSION,
             &raw.id,
             &raw.item_type,
             &raw.secret_nonce,
             &raw.secret_ciphertext,
         )?;
 
-        let current_totp = match &secret {
+        let (current_totp, totp_error) = match &secret {
             SecretPayload::Login {
                 totp_uri: Some(uri),
                 ..
             } if !uri.trim().is_empty() => {
-                generate_current_totp(uri, AppState::now_unix() as u64).ok()
+                match generate_current_totp(uri, AppState::now_unix() as u64) {
+                    Ok(dto) => (Some(dto), None),
+                    Err(err) => (None, Some(err.message)),
+                }
             }
-            _ => None,
+            _ => (None, None),
         };
 
         Ok(ItemDetailDto {
@@ -379,10 +474,84 @@ pub fn get_item_detail(state: State<'_, AppState>, item_id: String) -> VaultResu
             overview,
             secret,
             current_totp,
+            totp_error,
             created_at: raw.created_at,
             updated_at: raw.updated_at,
         })
     })
+}
+
+fn validate_save_item_bounds(input: &SaveItemInput) -> VaultResult<()> {
+    if input.overview.title.trim().is_empty() {
+        return Err(VaultError::validation("El título del ítem es obligatorio."));
+    }
+    if input.overview.title.len() > MAX_TITLE_BYTES {
+        return Err(VaultError::validation(
+            "El título del ítem excede la longitud máxima permitida.",
+        ));
+    }
+    if input.item_type != input.secret.expected_item_type() {
+        return Err(VaultError::validation(
+            "El tipo de ítem no coincide con la estructura del payload secreto.",
+        ));
+    }
+
+    match &input.secret {
+        SecretPayload::Login {
+            password,
+            totp_uri,
+            notes,
+            ..
+        } => {
+            if password.is_empty() {
+                return Err(VaultError::validation(
+                    "La contraseña de una credencial login no puede estar vacía.",
+                ));
+            }
+            if password.len() > MAX_FIELD_BYTES
+                || notes.as_ref().map(|n| n.len()).unwrap_or(0) > MAX_FIELD_BYTES
+            {
+                return Err(VaultError::validation(
+                    "Uno de los campos excede el límite máximo de 256 KiB.",
+                ));
+            }
+            if let Some(uri) = totp_uri {
+                if !uri.trim().is_empty() {
+                    validate_totp_input(uri)?;
+                }
+            }
+        }
+        SecretPayload::Note { body } => {
+            if body.len() > MAX_FIELD_BYTES {
+                return Err(VaultError::validation(
+                    "La nota segura excede el límite máximo de 256 KiB.",
+                ));
+            }
+        }
+        SecretPayload::Card { notes, .. } => {
+            if notes.as_ref().map(|n| n.len()).unwrap_or(0) > MAX_FIELD_BYTES {
+                return Err(VaultError::validation(
+                    "Las notas de la tarjeta exceden el límite máximo de 256 KiB.",
+                ));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+pub fn validate_totp_or_skip(secret: &SecretPayload) {
+    if let SecretPayload::Login {
+        totp_uri: Some(uri),
+        ..
+    } = secret
+    {
+        if !uri.trim().is_empty() {
+            if let Err(err) = validate_totp_input(uri) {
+                tracing::warn!("URI TOTP inválida detectada en respaldo importado: {}", err);
+            }
+        }
+    }
 }
 
 #[tauri::command]
@@ -390,21 +559,7 @@ pub fn save_item(
     state: State<'_, AppState>,
     mut input: SaveItemInput,
 ) -> VaultResult<CachedItemOverview> {
-    if input.overview.title.trim().is_empty() {
-        return Err(VaultError::validation("El título del ítem es obligatorio."));
-    }
-    if input.item_type != input.secret.expected_item_type() {
-        return Err(VaultError::validation(
-            "El tipo de ítem no coincide con la estructura del payload secreto.",
-        ));
-    }
-    if let SecretPayload::Login { ref password, .. } = input.secret {
-        if password.is_empty() {
-            return Err(VaultError::validation(
-                "La contraseña de una credencial login no puede estar vacía.",
-            ));
-        }
-    }
+    validate_save_item_bounds(&input)?;
 
     state.with_unlocked_mut(|session| {
         let now = AppState::now_unix();
@@ -434,6 +589,7 @@ pub fn save_item(
             }
             let prev_secret = decrypt_item_secret(
                 &session.subkeys.secret_key,
+                CURRENT_SCHEMA_VERSION,
                 &prev_row.id,
                 &prev_row.item_type,
                 &prev_row.secret_nonce,
@@ -519,13 +675,13 @@ pub fn save_item(
 
         let cached = CachedItemOverview {
             id: item_id.clone(),
-            folder_id: input.folder_id,
-            item_type: input.item_type,
+            folder_id: input.folder_id.clone(),
+            item_type: input.item_type.clone(),
             favorite: input.favorite,
-            title: input.overview.title,
-            subtitle: input.overview.subtitle,
-            urls: input.overview.urls,
-            tags: input.overview.tags,
+            title: input.overview.title.clone(),
+            subtitle: input.overview.subtitle.clone(),
+            urls: input.overview.urls.clone(),
+            tags: input.overview.tags.clone(),
             updated_at: now,
         };
         session.items_cache.insert(item_id, cached.clone());
@@ -551,6 +707,11 @@ pub fn save_folder(state: State<'_, AppState>, input: SaveFolderInput) -> VaultR
     if trimmed.is_empty() {
         return Err(VaultError::validation(
             "El nombre de la carpeta no puede estar vacío.",
+        ));
+    }
+    if trimmed.len() > MAX_TITLE_BYTES {
+        return Err(VaultError::validation(
+            "El nombre de la carpeta excede la longitud máxima permitida.",
         ));
     }
 

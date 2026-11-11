@@ -28,7 +28,13 @@ impl VaultDb {
         crate::platform::acl::harden_directory_acl(&base_dir);
 
         let db_path = base_dir.join(DB_FILE_NAME);
-        Self::open_at(&db_path)
+        // Repara DACLs previas (ej. instalación elevada con `OW`) antes de abrir SQLite
+        crate::platform::acl::harden_vault_db_files(&db_path);
+
+        let db = Self::open_at(&db_path)?;
+        // Asegura DACL explícita de TokenUser también sobre archivos recién creados (-wal / -shm)
+        crate::platform::acl::harden_vault_db_files(&db_path);
+        Ok(db)
     }
 
     pub fn open_at(path: &Path) -> VaultResult<Self> {

@@ -13,6 +13,9 @@ pub enum ErrorCode {
     ConsentRequired,
     ValidationError,
     BackupCorrupted,
+    DataCorrupted,
+    RateLimited,
+    DialogCancelled,
     InternalError,
 }
 
@@ -43,6 +46,21 @@ impl VaultError {
 
     pub fn validation(msg: impl Into<String>) -> Self {
         Self::new(ErrorCode::ValidationError, msg)
+    }
+
+    pub fn data_corrupted(msg: impl Into<String>) -> Self {
+        Self::new(ErrorCode::DataCorrupted, msg)
+    }
+
+    pub fn rate_limited(msg: impl Into<String>) -> Self {
+        Self::new(ErrorCode::RateLimited, msg)
+    }
+
+    pub fn dialog_cancelled() -> Self {
+        Self::new(
+            ErrorCode::DialogCancelled,
+            "Selección de archivo cancelada por el usuario.",
+        )
     }
 
     pub fn internal(msg: impl Into<String>) -> Self {

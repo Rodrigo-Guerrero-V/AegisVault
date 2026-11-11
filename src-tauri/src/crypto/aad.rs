@@ -35,6 +35,25 @@ pub fn mk_wrap_aad(
     ])
 }
 
+pub fn config_prefs_aad(schema_version: u32) -> Vec<u8> {
+    encode_aad(&[b"config_prefs", &schema_version.to_le_bytes()])
+}
+
+pub fn hello_binding_aad(
+    schema_version: u32,
+    hello_enabled: bool,
+    hello_key_name: Option<&str>,
+    hello_wrapped_vk: Option<&[u8]>,
+) -> Vec<u8> {
+    encode_aad(&[
+        b"hello_binding",
+        &schema_version.to_le_bytes(),
+        &[u8::from(hello_enabled)],
+        hello_key_name.unwrap_or("").as_bytes(),
+        hello_wrapped_vk.unwrap_or(&[]),
+    ])
+}
+
 pub fn folder_aad(schema_version: u32, folder_id: &str) -> Vec<u8> {
     encode_aad(&[
         b"folder_name",

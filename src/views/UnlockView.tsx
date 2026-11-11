@@ -72,7 +72,7 @@ export function UnlockView({
           <div>
             <h2 style={{ margin: 0, fontSize: 20 }}>Bóveda bloqueada</h2>
             <span style={{ fontSize: 12.5, color: "var(--text-secondary)" }}>
-              AegisVault · Claves purgadas de memoria RAM
+              AegisVault · Claves y caché nativa zeroizadas en RAM
             </span>
           </div>
         </div>

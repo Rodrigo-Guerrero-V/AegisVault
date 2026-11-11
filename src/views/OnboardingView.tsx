@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { open as openDialog } from "@tauri-apps/plugin-dialog";
 import { FolderOpen, Shield, TriangleAlert } from "lucide-react";
 import { vaultCommands } from "../ipc/commands";
 import { parseVaultError, type VaultSessionInfo } from "../ipc/types";
@@ -13,18 +12,22 @@ export function OnboardingView({ onInitialized }: Props) {
   const [masterPassword, setMasterPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
   const [backupPassword, setBackupPassword] = useState("");
-  const [backupPath, setBackupPath] = useState("");
+  const [backupFileLabel, setBackupFileLabel] = useState("");
   const [ackNoRecovery, setAckNoRecovery] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const pickBackupFile = async () => {
-    const selected = await openDialog({
-      multiple: false,
-      filters: [{ name: "Respaldo AegisVault", extensions: ["aegisvault"] }],
-    });
-    if (typeof selected === "string") {
-      setBackupPath(selected);
+    setError(null);
+    try {
+      const selected = await vaultCommands.selectRestoreBackupFile();
+      const kb = (selected.size_bytes / 1024).toFixed(1);
+      setBackupFileLabel(`${selected.file_name} (${kb} KB)`);
+    } catch (err) {
+      const parsed = parseVaultError(err);
+      if (parsed.code !== "DIALOG_CANCELLED") {
+        setError(parsed.message);
+      }
     }
   };
 
@@ -47,13 +50,7 @@ export function OnboardingView({ onInitialized }: Props) {
         const session = await vaultCommands.createVault(masterPassword, ackNoRecovery);
         onInitialized(session);
       } else {
-        if (!backupPath) {
-          setError("Selecciona un archivo .aegisvault para restaurar.");
-          setBusy(false);
-          return;
-        }
         const session = await vaultCommands.restoreEncryptedBackup(
-          backupPath,
           backupPassword,
           masterPassword,
           ackNoRecovery
@@ -61,7 +58,10 @@ export function OnboardingView({ onInitialized }: Props) {
         onInitialized(session);
       }
     } catch (err) {
-      setError(parseVaultError(err).message);
+      const parsed = parseVaultError(err);
+      if (parsed.code !== "DIALOG_CANCELLED") {
+        setError(parsed.message);
+      }
     } finally {
       setBusy(false);
     }
@@ -119,10 +119,10 @@ export function OnboardingView({ onInitialized }: Props) {
                   <input
                     className="text-input"
                     readOnly
-                    value={backupPath}
+                    value={backupFileLabel}
                     placeholder="Ningún archivo seleccionado"
                   />
-                  <button type="button" className="btn btn-secondary" onClick={pickBackupFile}>
+                  <button type="button" className="btn btn-secondary" onClick={() => void pickBackupFile()}>
                     <FolderOpen size={15} />
                     Elegir
                   </button>
@@ -144,7 +144,9 @@ export function OnboardingView({ onInitialized }: Props) {
 
           <div className="field-group">
             <label className="field-label">
-              {mode === "create" ? "Contraseña Maestra (mínimo 12 caracteres)" : "Nueva Contraseña Maestra local"}
+              {mode === "create"
+                ? "Contraseña Maestra (mínimo 12 caracteres y alta entropía)"
+                : "Nueva Contraseña Maestra local (mín. 12 caracteres)"}
             </label>
             <input
               className="text-input"
@@ -154,6 +156,9 @@ export function OnboardingView({ onInitialized }: Props) {
               value={masterPassword}
               onChange={(e) => setMasterPassword(e.target.value)}
             />
+            <span style={{ fontSize: 11.5, color: "var(--text-muted)" }}>
+              Usa una frase de paso impredecible o combinación variada (entropía mínima 3/4).
+            </span>
           </div>
 
           <div className="field-group">

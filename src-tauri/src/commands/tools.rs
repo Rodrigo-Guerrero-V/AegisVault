@@ -7,7 +7,7 @@ use crate::crypto::{
     generator::{generate_password as run_csprng, GeneratedPasswordDto, PasswordGenOptions},
     totp::generate_current_totp,
 };
-use crate::db::repo::get_raw_item_full;
+use crate::db::{repo::get_raw_item_full, schema::CURRENT_SCHEMA_VERSION};
 use crate::error::{VaultError, VaultResult};
 use crate::state::AppState;
 
@@ -47,6 +47,7 @@ pub fn copy_item_field(
 
         let secret = decrypt_item_secret(
             &session.subkeys.secret_key,
+            CURRENT_SCHEMA_VERSION,
             &raw.id,
             &raw.item_type,
             &raw.secret_nonce,

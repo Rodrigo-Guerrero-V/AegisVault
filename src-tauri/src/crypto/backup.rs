@@ -4,7 +4,7 @@ use crate::commands::vault::{OverviewPayload, SecretPayload};
 use crate::crypto::{
     aad::backup_aad,
     aead::{decrypt_with_aad, encrypt_with_aad, NONCE_LEN},
-    kdf::{derive_key_argon2id, generate_salt, KdfParams, SALT_LEN},
+    kdf::{derive_key_argon2id, generate_salt, validate_kdf_params, KdfParams, SALT_LEN},
 };
 use crate::error::{ErrorCode, VaultError, VaultResult};
 use serde::{Deserialize, Serialize};
@@ -13,11 +13,6 @@ pub const BACKUP_MAGIC: &[u8; 8] = b"AEGISBAK";
 pub const BACKUP_FORMAT_VERSION: u8 = 1;
 pub const HEADER_LEN: usize = 8 + 1 + 8 + 4 + 4 + 4 + SALT_LEN + NONCE_LEN; // 57 bytes
 const GCM_TAG_LEN: usize = 16;
-
-const MAX_BACKUP_KDF_MEM_KIB: u32 = 524_288; // 512 MiB tope defensivo anti-DoS
-const MIN_BACKUP_KDF_MEM_KIB: u32 = 8_192;
-const MAX_BACKUP_ITERATIONS: u32 = 32;
-const MAX_BACKUP_PARALLELISM: u32 = 16;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BackupFolderRecord {
@@ -41,9 +36,23 @@ pub struct BackupItemRecord {
 
 impl Zeroize for BackupItemRecord {
     fn zeroize(&mut self) {
+        self.id.zeroize();
+        if let Some(ref mut fid) = self.folder_id {
+            fid.zeroize();
+        }
+        self.folder_id = None;
+        self.item_type.zeroize();
+        self.favorite = false;
+        self.overview.zeroize();
         self.secret.zeroize();
-        self.overview.title.zeroize();
-        self.overview.subtitle.zeroize();
+        self.created_at = 0;
+        self.updated_at = 0;
+    }
+}
+
+impl Drop for BackupItemRecord {
+    fn drop(&mut self) {
+        self.zeroize();
     }
 }
 
@@ -58,11 +67,16 @@ pub struct BackupSnapshot {
 impl Zeroize for BackupSnapshot {
     fn zeroize(&mut self) {
         for f in &mut self.folders {
+            f.id.zeroize();
             f.name.zeroize();
+            f.created_at = 0;
+            f.updated_at = 0;
         }
+        self.folders.clear();
         for it in &mut self.items {
             it.zeroize();
         }
+        self.items.clear();
     }
 }
 
@@ -78,6 +92,7 @@ pub fn seal_backup_bytes(
     params: KdfParams,
     created_at: i64,
 ) -> VaultResult<Vec<u8>> {
+    validate_kdf_params(params, ErrorCode::ValidationError)?;
     let salt = generate_salt();
     let backup_key = derive_key_argon2id(backup_password, &salt, params)?;
 
@@ -132,25 +147,17 @@ pub fn open_backup_bytes(raw: &[u8], backup_password: &str) -> VaultResult<Backu
     let iterations = u32::from_le_bytes(raw[21..25].try_into().unwrap());
     let parallelism = u32::from_le_bytes(raw[25..29].try_into().unwrap());
 
-    if !(MIN_BACKUP_KDF_MEM_KIB..=MAX_BACKUP_KDF_MEM_KIB).contains(&mem_kib)
-        || !(1..=MAX_BACKUP_ITERATIONS).contains(&iterations)
-        || !(1..=MAX_BACKUP_PARALLELISM).contains(&parallelism)
-    {
-        return Err(VaultError::new(
-            ErrorCode::BackupCorrupted,
-            "Parámetros KDF del archivo de respaldo fuera de rango seguro.",
-        ));
-    }
-
-    let salt = &raw[29..45];
-    let nonce = &raw[45..57];
-    let ciphertext = &raw[57..];
-
     let params = KdfParams {
         mem_kib,
         iterations,
         parallelism,
     };
+    validate_kdf_params(params, ErrorCode::BackupCorrupted)?;
+
+    let salt = &raw[29..45];
+    let nonce = &raw[45..57];
+    let ciphertext = &raw[57..];
+
     let backup_key = derive_key_argon2id(backup_password, salt, params)?;
     let aad = backup_aad(
         format_ver,

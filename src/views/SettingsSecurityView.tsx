@@ -1,6 +1,14 @@
 import { useEffect, useState } from "react";
-import { open as openDialog, save as saveDialog } from "@tauri-apps/plugin-dialog";
-import { Download, Fingerprint, KeyRound, Moon, ShieldAlert, Sun, Upload } from "lucide-react";
+import {
+  Download,
+  EyeOff,
+  Fingerprint,
+  KeyRound,
+  Moon,
+  ShieldAlert,
+  Sun,
+  Upload,
+} from "lucide-react";
 import { useTheme } from "../hooks/useTheme";
 import { vaultCommands } from "../ipc/commands";
 import { parseVaultError, type SecurityPrefsDto } from "../ipc/types";
@@ -14,6 +22,7 @@ export function SettingsSecurityView({ onVaultMutated }: Props) {
   const [prefs, setPrefs] = useState<SecurityPrefsDto | null>(null);
   const [lockSecs, setLockSecs] = useState(300);
   const [clipSecs, setClipSecs] = useState(25);
+  const [captureProtected, setCaptureProtected] = useState(true);
 
   const [helloPassword, setHelloPassword] = useState("");
 
@@ -23,6 +32,7 @@ export function SettingsSecurityView({ onVaultMutated }: Props) {
 
   const [exportMasterPass, setExportMasterPass] = useState("");
   const [exportBackupPass, setExportBackupPass] = useState("");
+  const [corruptRecoveryMsg, setCorruptRecoveryMsg] = useState<string | null>(null);
   const [importBackupPass, setImportBackupPass] = useState("");
 
   const [feedback, setFeedback] = useState<{ type: "ok" | "err"; msg: string } | null>(null);
@@ -34,6 +44,7 @@ export function SettingsSecurityView({ onVaultMutated }: Props) {
       setPrefs(p);
       setLockSecs(p.lock_timeout_secs);
       setClipSecs(p.clipboard_ttl_secs);
+      setCaptureProtected(p.capture_protection_enabled);
     } catch (err) {
       notifyErr(err);
     }
@@ -44,16 +55,38 @@ export function SettingsSecurityView({ onVaultMutated }: Props) {
   }, []);
 
   const notifyOk = (msg: string) => setFeedback({ type: "ok", msg });
-  const notifyErr = (err: unknown) =>
-    setFeedback({ type: "err", msg: parseVaultError(err).message });
+  const notifyErr = (err: unknown) => {
+    const parsed = parseVaultError(err);
+    if (parsed.code !== "DIALOG_CANCELLED") {
+      setFeedback({ type: "err", msg: parsed.message });
+    }
+  };
 
   const handleSaveTimers = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true);
     try {
-      await vaultCommands.updateSecurityPrefs(lockSecs, clipSecs);
-      notifyOk("Tiempos de bloqueo y limpieza del portapapeles actualizados.");
+      await vaultCommands.updateSecurityPrefs(lockSecs, clipSecs, captureProtected);
+      notifyOk("Preferencias autenticadas de autoprotección actualizadas.");
     } catch (err) {
+      notifyErr(err);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleToggleCaptureProtection = async (enabled: boolean) => {
+    setCaptureProtected(enabled);
+    setBusy(true);
+    try {
+      await vaultCommands.updateSecurityPrefs(lockSecs, clipSecs, enabled);
+      notifyOk(
+        enabled
+          ? "Protección contra capturas de pantalla activada (WDA_EXCLUDEFROMCAPTURE)."
+          : "Protección contra capturas desactivada temporalmente."
+      );
+    } catch (err) {
+      setCaptureProtected(!enabled);
       notifyErr(err);
     } finally {
       setBusy(false);
@@ -63,11 +96,17 @@ export function SettingsSecurityView({ onVaultMutated }: Props) {
   const handleRotatePassword = async (e: React.FormEvent) => {
     e.preventDefault();
     if (newPass.length < 12) {
-      setFeedback({ type: "err", msg: "La nueva Contraseña Maestra requiere mínimo 12 caracteres." });
+      setFeedback({
+        type: "err",
+        msg: "La nueva Contraseña Maestra requiere mínimo 12 caracteres.",
+      });
       return;
     }
     if (newPass !== confirmNewPass) {
-      setFeedback({ type: "err", msg: "La confirmación de la nueva contraseña no coincide." });
+      setFeedback({
+        type: "err",
+        msg: "La confirmación de la nueva contraseña no coincide.",
+      });
       return;
     }
     setBusy(true);
@@ -89,45 +128,63 @@ export function SettingsSecurityView({ onVaultMutated }: Props) {
     }
   };
 
-  const handleExport = async (e: React.FormEvent) => {
-    e.preventDefault();
-    const dest = await saveDialog({
-      defaultPath: `respaldo-${new Date().toISOString().slice(0, 10)}.aegisvault`,
-      filters: [{ name: "Respaldo AegisVault", extensions: ["aegisvault"] }],
-    });
-    if (!dest) return;
-
+  const runExport = async (skipCorrupted: boolean) => {
     setBusy(true);
+    setCorruptRecoveryMsg(null);
     try {
-      await vaultCommands.exportEncryptedBackup(exportMasterPass, exportBackupPass, dest);
+      const res = await vaultCommands.exportEncryptedBackup(
+        exportMasterPass,
+        exportBackupPass,
+        skipCorrupted
+      );
       setExportMasterPass("");
       setExportBackupPass("");
-      notifyOk("Respaldo cifrado .aegisvault exportado correctamente.");
+      notifyOk(
+        res.skipped_corrupted > 0
+          ? `Respaldo exportado omitiendo ${res.skipped_corrupted} registro(s) dañados.`
+          : "Respaldo cifrado .aegisvault exportado correctamente."
+      );
     } catch (err) {
-      notifyErr(err);
+      const parsed = parseVaultError(err);
+      if (parsed.code === "DIALOG_CANCELLED") {
+        return;
+      }
+      if (parsed.code === "DATA_CORRUPTED") {
+        setCorruptRecoveryMsg(parsed.message);
+        return;
+      }
+      setFeedback({ type: "err", msg: parsed.message });
     } finally {
       setBusy(false);
     }
   };
 
+  const handleExport = async (e: React.FormEvent) => {
+    e.preventDefault();
+    await runExport(false);
+  };
+
   const handleImport = async () => {
     if (!importBackupPass) {
-      setFeedback({ type: "err", msg: "Ingresa primero la contraseña del archivo .aegisvault." });
+      setFeedback({
+        type: "err",
+        msg: "Ingresa primero la contraseña del archivo .aegisvault.",
+      });
       return;
     }
-    const source = await openDialog({
-      multiple: false,
-      filters: [{ name: "Respaldo AegisVault", extensions: ["aegisvault"] }],
-    });
-    if (typeof source !== "string") return;
 
     setBusy(true);
     try {
-      const stats = await vaultCommands.importEncryptedBackup(source, importBackupPass);
+      const stats = await vaultCommands.importEncryptedBackup(importBackupPass);
       setImportBackupPass("");
       onVaultMutated();
+      const skippedTotal = stats.folders_skipped + stats.items_skipped;
+      const skipSuffix =
+        skippedTotal > 0
+          ? ` (${stats.folders_skipped} carpetas y ${stats.items_skipped} ítems idénticos omitidos sin duplicar).`
+          : ".";
       notifyOk(
-        `Importación completada: ${stats.folders_imported} carpetas y ${stats.items_imported} ítems fusionados.`
+        `Importación completada: ${stats.folders_imported} carpetas y ${stats.items_imported} ítems fusionados${skipSuffix}`
       );
     } catch (err) {
       notifyErr(err);
@@ -159,7 +216,8 @@ export function SettingsSecurityView({ onVaultMutated }: Props) {
               <h4 style={{ margin: 0 }}>Tema oscuro</h4>
             </div>
             <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0 }}>
-              Tema claro por defecto. Se activa automáticamente con <code>prefers-color-scheme: dark</code> o de forma manual desde este interruptor
+              Tema claro por defecto. Se activa automáticamente con{" "}
+              <code>prefers-color-scheme: dark</code> o de forma manual desde este interruptor
               {preference === null ? " (siguiendo al sistema)." : " (selección manual activa)."}
             </p>
           </div>
@@ -180,6 +238,32 @@ export function SettingsSecurityView({ onVaultMutated }: Props) {
             </button>
           </div>
         )}
+      </div>
+
+      {/* Protección anticaptura Win32 WDA_EXCLUDEFROMCAPTURE */}
+      <div className="secret-field-card" style={{ display: "block", marginBottom: 18 }}>
+        <div className="set-row">
+          <div>
+            <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 4 }}>
+              <EyeOff size={18} color="var(--accent)" />
+              <h4 style={{ margin: 0 }}>Bloquear capturas de pantalla</h4>
+            </div>
+            <p style={{ fontSize: 13, color: "var(--text-secondary)", margin: 0 }}>
+              Oculta la ventana ante herramientas de captura, grabación de escritorio y Windows
+              Recall mediante <code>WDA_EXCLUDEFROMCAPTURE</code>.
+            </p>
+          </div>
+          <label className="switch">
+            <input
+              type="checkbox"
+              checked={captureProtected}
+              disabled={busy}
+              onChange={(e) => void handleToggleCaptureProtection(e.target.checked)}
+              aria-label="Bloquear capturas de pantalla"
+            />
+            <span className="track" />
+          </label>
+        </div>
       </div>
 
       {/* Tiempos de autoprotección */}
@@ -221,8 +305,8 @@ export function SettingsSecurityView({ onVaultMutated }: Props) {
           <h4 style={{ margin: 0 }}>Desbloqueo rápido con Windows Hello (TPM)</h4>
         </div>
         <p style={{ fontSize: 12.5, color: "var(--text-secondary)", marginTop: 0 }}>
-          Envuelve una copia de <code>VaultKey</code> dentro de Microsoft Passport KSP sin
-          reemplazar jamás tu Contraseña Maestra.
+          Envuelve una copia autenticada de <code>VaultKey</code> dentro de Microsoft Passport KSP
+          sin reemplazar jamás tu Contraseña Maestra.
         </p>
 
         {prefs?.hello_enabled ? (
@@ -266,7 +350,7 @@ export function SettingsSecurityView({ onVaultMutated }: Props) {
                 }
               }}
             >
-              {prefs?.hello_available ? "Habilitar Hello" : "Disponible en Fase 4 (TPM)"}
+              {prefs?.hello_available ? "Habilitar Hello" : "No disponible en este equipo"}
             </button>
           </div>
         )}
@@ -294,7 +378,7 @@ export function SettingsSecurityView({ onVaultMutated }: Props) {
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 }}>
           <div className="field-group">
-            <label className="field-label">Nueva Contraseña Maestra (mín. 12)</label>
+            <label className="field-label">Nueva Contraseña Maestra (mín. 12, alta entropía)</label>
             <input
               type="password"
               className="text-input"
@@ -354,6 +438,21 @@ export function SettingsSecurityView({ onVaultMutated }: Props) {
             />
           </div>
         </div>
+
+        {corruptRecoveryMsg && (
+          <div className="alert-box alert-warn" style={{ marginBottom: 12 }}>
+            <div style={{ marginBottom: 8 }}>{corruptRecoveryMsg}</div>
+            <button
+              type="button"
+              className="btn btn-secondary btn-small"
+              disabled={busy}
+              onClick={() => void runExport(true)}
+            >
+              Exportar omitiendo registros dañados
+            </button>
+          </div>
+        )}
+
         <button type="submit" className="btn btn-primary" disabled={busy}>
           <Download size={15} />
           Exportar respaldo .aegisvault

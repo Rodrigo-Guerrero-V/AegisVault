@@ -29,6 +29,7 @@ rand = "0.8"
 subtle = "2.6"
 zeroize = { version = "1.8", features = ["derive"] }
 unicode-normalization = "0.1"
+zxcvbn = "3.1"
 
 # Persistencia e identificadores
 rusqlite = { version = "0.33", features = ["bundled"] }
@@ -48,5 +49,6 @@ features = [
     "Win32_System_Ole",
     "Win32_System_Power",
     "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
     "Win32_UI_WindowsAndMessaging",
 ]

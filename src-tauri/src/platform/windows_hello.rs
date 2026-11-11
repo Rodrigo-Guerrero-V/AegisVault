@@ -12,6 +12,24 @@ pub const NTE_PERM_HR: i32 = 0x8009_0010u32 as i32;
 pub const NTE_INVALID_HANDLE_HR: i32 = 0x8009_0026u32 as i32;
 pub const TPM_E_KEY_NOT_LOADED_HR: i32 = 0x8029_040Fu32 as i32;
 
+/// Verifica estrictamente el formato `^AegisVault\.VK\.[0-9a-f-]{36}$` antes de abrir o eliminar
+/// claves persistidas en Microsoft Passport KSP, bloqueando borrado arbitrario si `vault.db` es alterado.
+pub fn is_valid_hello_key_name(key_name: &str) -> bool {
+    let Some(uuid_part) = key_name.strip_prefix("AegisVault.VK.") else {
+        return false;
+    };
+    if uuid_part.len() != 36 {
+        return false;
+    }
+    if !uuid_part
+        .bytes()
+        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f' | b'-'))
+    {
+        return false;
+    }
+    uuid::Uuid::parse_str(uuid_part).is_ok()
+}
+
 pub(crate) fn classify_ncrypt_hresult(code: i32, context: &str) -> VaultError {
     if matches!(
         code,
@@ -165,6 +183,11 @@ mod imp {
         vault_key: &ProtectedKey,
         parent_hwnd: Option<isize>,
     ) -> VaultResult<Vec<u8>> {
+        if !is_valid_hello_key_name(key_name) {
+            return Err(VaultError::validation(
+                "Identificador de clave de Windows Hello inválido.",
+            ));
+        }
         let key_name_w = to_wide_null(key_name);
 
         unsafe {
@@ -324,6 +347,12 @@ mod imp {
         wrapped_vk: &[u8],
         parent_hwnd: Option<isize>,
     ) -> VaultResult<ProtectedKey> {
+        if !is_valid_hello_key_name(key_name) {
+            return Err(VaultError::new(
+                ErrorCode::HelloInvalidated,
+                "Nombre de contenedor Windows Hello inválido o alterado.",
+            ));
+        }
         let key_name_w = to_wide_null(key_name);
 
         unsafe {
@@ -384,8 +413,16 @@ mod imp {
         }
     }
 
-    /// Destruye de forma silenciosa la clave persistida en Microsoft Passport KSP si existe.
+    /// Destruye de forma silenciosa la clave persistida en Microsoft Passport KSP si existe
+    /// y su identificador cumple `^AegisVault\.VK\.[0-9a-f-]{36}$`.
     pub fn delete_persisted_hello_key(key_name: &str) {
+        if !is_valid_hello_key_name(key_name) {
+            tracing::warn!(
+                "Rechazando eliminar clave NGC con nombre fuera de patrón permitido: {}",
+                key_name
+            );
+            return;
+        }
         let key_name_w = to_wide_null(key_name);
         unsafe {
             let mut prov = NCRYPT_PROV_HANDLE::default();
@@ -403,10 +440,9 @@ mod imp {
                 NCRYPT_SILENT_FLAG,
             )
             .is_ok()
+                && NCryptDeleteKey(ncrypt_key, 0).is_err()
             {
-                if NCryptDeleteKey(ncrypt_key, 0).is_err() {
-                    let _ = NCryptFreeObject(ncrypt_key.into());
-                }
+                let _ = NCryptFreeObject(ncrypt_key.into());
             }
         }
     }

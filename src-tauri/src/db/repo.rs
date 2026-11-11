@@ -1,5 +1,7 @@
 use rusqlite::{params, Connection, OptionalExtension};
 
+use crate::db::schema::CURRENT_SCHEMA_VERSION;
+
 #[derive(Debug, Clone)]
 pub struct VaultConfigRow {
     pub schema_version: u32,
@@ -14,6 +16,10 @@ pub struct VaultConfigRow {
     pub hello_wrapped_vk: Option<Vec<u8>>,
     pub lock_timeout_secs: u64,
     pub clipboard_ttl_secs: u64,
+    pub prefs_nonce: Option<Vec<u8>>,
+    pub prefs_ciphertext: Option<Vec<u8>>,
+    pub vk_keycheck: Option<Vec<u8>>,
+    pub hello_mac: Option<Vec<u8>>,
 }
 
 pub struct NewVaultConfig<'a> {
@@ -24,6 +30,12 @@ pub struct NewVaultConfig<'a> {
     pub kdf_parallelism: u32,
     pub mk_wrapped_vk: &'a [u8],
     pub mk_wrap_nonce: &'a [u8],
+    pub lock_timeout_secs: u64,
+    pub clipboard_ttl_secs: u64,
+    pub prefs_nonce: &'a [u8],
+    pub prefs_ciphertext: &'a [u8],
+    pub vk_keycheck: &'a [u8],
+    pub hello_mac: &'a [u8],
     pub now: i64,
 }
 
@@ -31,11 +43,14 @@ pub fn load_vault_config(conn: &Connection) -> rusqlite::Result<Option<VaultConf
     conn.query_row(
         "SELECT schema_version, kdf_salt, kdf_mem_kib, kdf_iterations, kdf_parallelism,
                 mk_wrapped_vk, mk_wrap_nonce, hello_enabled, hello_key_name, hello_wrapped_vk,
-                lock_timeout_secs, clipboard_ttl_secs
+                lock_timeout_secs, clipboard_ttl_secs,
+                prefs_nonce, prefs_ciphertext, vk_keycheck, hello_mac
          FROM vault_config
          WHERE id = 1",
         [],
         |row| {
+            let raw_lock: i64 = row.get(10)?;
+            let raw_clip: i64 = row.get(11)?;
             Ok(VaultConfigRow {
                 schema_version: row.get::<_, u32>(0)?,
                 kdf_salt: row.get(1)?,
@@ -47,8 +62,12 @@ pub fn load_vault_config(conn: &Connection) -> rusqlite::Result<Option<VaultConf
                 hello_enabled: row.get::<_, i64>(7)? != 0,
                 hello_key_name: row.get(8)?,
                 hello_wrapped_vk: row.get(9)?,
-                lock_timeout_secs: row.get::<_, u64>(10)?,
-                clipboard_ttl_secs: row.get::<_, u64>(11)?,
+                lock_timeout_secs: u64::try_from(raw_lock).unwrap_or(0),
+                clipboard_ttl_secs: u64::try_from(raw_clip).unwrap_or(0),
+                prefs_nonce: row.get(12)?,
+                prefs_ciphertext: row.get(13)?,
+                vk_keycheck: row.get(14)?,
+                hello_mac: row.get(15)?,
             })
         },
     )
@@ -59,9 +78,11 @@ pub fn insert_initial_config(conn: &Connection, cfg: &NewVaultConfig<'_>) -> rus
     conn.execute(
         "INSERT INTO vault_config (
             id, schema_version, kdf_salt, kdf_mem_kib, kdf_iterations, kdf_parallelism,
-            mk_wrapped_vk, mk_wrap_nonce, hello_enabled, lock_timeout_secs, clipboard_ttl_secs,
+            mk_wrapped_vk, mk_wrap_nonce, hello_enabled,
+            lock_timeout_secs, clipboard_ttl_secs,
+            prefs_nonce, prefs_ciphertext, vk_keycheck, hello_mac,
             created_at, updated_at
-        ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, 300, 25, ?8, ?8)",
+        ) VALUES (1, ?1, ?2, ?3, ?4, ?5, ?6, ?7, 0, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?14)",
         params![
             cfg.schema_version,
             cfg.kdf_salt,
@@ -70,6 +91,12 @@ pub fn insert_initial_config(conn: &Connection, cfg: &NewVaultConfig<'_>) -> rus
             cfg.kdf_parallelism,
             cfg.mk_wrapped_vk,
             cfg.mk_wrap_nonce,
+            cfg.lock_timeout_secs,
+            cfg.clipboard_ttl_secs,
+            cfg.prefs_nonce,
+            cfg.prefs_ciphertext,
+            cfg.vk_keycheck,
+            cfg.hello_mac,
             cfg.now,
         ],
     )?;
@@ -77,6 +104,7 @@ pub fn insert_initial_config(conn: &Connection, cfg: &NewVaultConfig<'_>) -> rus
 }
 
 /// Rotación atómica de Contraseña Maestra + invalidación de Windows Hello en la misma transacción.
+#[allow(clippy::too_many_arguments)]
 pub fn rotate_master_key_tx(
     conn: &mut Connection,
     new_salt: &[u8],
@@ -85,6 +113,8 @@ pub fn rotate_master_key_tx(
     parallelism: u32,
     new_wrapped_vk: &[u8],
     new_wrap_nonce: &[u8],
+    vk_keycheck: &[u8],
+    disabled_hello_mac: &[u8],
     now: i64,
 ) -> rusqlite::Result<Option<String>> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -99,24 +129,30 @@ pub fn rotate_master_key_tx(
 
     tx.execute(
         "UPDATE vault_config
-         SET kdf_salt = ?1,
-             kdf_mem_kib = ?2,
-             kdf_iterations = ?3,
-             kdf_parallelism = ?4,
-             mk_wrapped_vk = ?5,
-             mk_wrap_nonce = ?6,
+         SET schema_version = ?1,
+             kdf_salt = ?2,
+             kdf_mem_kib = ?3,
+             kdf_iterations = ?4,
+             kdf_parallelism = ?5,
+             mk_wrapped_vk = ?6,
+             mk_wrap_nonce = ?7,
+             vk_keycheck = ?8,
              hello_enabled = 0,
              hello_key_name = NULL,
              hello_wrapped_vk = NULL,
-             updated_at = ?7
+             hello_mac = ?9,
+             updated_at = ?10
          WHERE id = 1",
         params![
+            CURRENT_SCHEMA_VERSION,
             new_salt,
             mem_kib,
             iterations,
             parallelism,
             new_wrapped_vk,
             new_wrap_nonce,
+            vk_keycheck,
+            disabled_hello_mac,
             now
         ],
     )?;
@@ -129,20 +165,28 @@ pub fn update_security_prefs_row(
     conn: &Connection,
     lock_timeout_secs: u64,
     clipboard_ttl_secs: u64,
+    prefs_nonce: &[u8],
+    prefs_ciphertext: &[u8],
     now: i64,
 ) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE vault_config
          SET lock_timeout_secs = ?1,
              clipboard_ttl_secs = ?2,
-             updated_at = ?3
+             prefs_nonce = ?3,
+             prefs_ciphertext = ?4,
+             updated_at = ?5
          WHERE id = 1",
-        params![lock_timeout_secs, clipboard_ttl_secs, now],
+        params![
+            lock_timeout_secs,
+            clipboard_ttl_secs,
+            prefs_nonce,
+            prefs_ciphertext,
+            now
+        ],
     )?;
     Ok(())
 }
-
-// Añadir al final de src-tauri/src/db/repo.rs
 
 #[derive(Debug, Clone)]
 pub struct RawFolderRow {
@@ -390,6 +434,7 @@ pub fn set_hello_enrollment_row(
     conn: &Connection,
     key_name: &str,
     wrapped_vk: &[u8],
+    hello_mac: &[u8],
     now: i64,
 ) -> rusqlite::Result<()> {
     conn.execute(
@@ -397,15 +442,17 @@ pub fn set_hello_enrollment_row(
          SET hello_enabled = 1,
              hello_key_name = ?1,
              hello_wrapped_vk = ?2,
-             updated_at = ?3
+             hello_mac = ?3,
+             updated_at = ?4
          WHERE id = 1",
-        params![key_name, wrapped_vk, now],
+        params![key_name, wrapped_vk, hello_mac, now],
     )?;
     Ok(())
 }
 
 pub fn clear_hello_enrollment_row(
     conn: &mut Connection,
+    new_hello_mac: Option<&[u8]>,
     now: i64,
 ) -> rusqlite::Result<Option<String>> {
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -423,9 +470,10 @@ pub fn clear_hello_enrollment_row(
          SET hello_enabled = 0,
              hello_key_name = NULL,
              hello_wrapped_vk = NULL,
-             updated_at = ?1
+             hello_mac = ?1,
+             updated_at = ?2
          WHERE id = 1",
-        params![now],
+        params![new_hello_mac, now],
     )?;
 
     tx.commit()?;
