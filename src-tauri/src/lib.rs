@@ -180,6 +180,20 @@ mod phase1_tests {
         assert!(validate_totp_input("otpauth://totp/Test?secret=JBSWY3DPEHPK3PXP&digits=5").is_err());
         assert!(validate_totp_input("otpauth://totp/Test?secret=JBSWY3DP%3").is_err());
     }
+
+    #[test]
+    fn totp_multibyte_char_at_byte_boundary_does_not_panic() {
+        // 9 bytes ASCII + 'é' (2 bytes UTF-8 en índices 9..11) + '…': antes provocaba panic en `input[..10]`
+        let multibyte_at_9 = "123456789é…";
+        assert!(validate_totp_input(multibyte_at_9).is_err());
+        assert!(generate_current_totp(multibyte_at_9, 59).is_err());
+
+        // Variantes adicionales con secuencias UTF-8 de 2, 3 y 4 bytes cruzando el byte 10
+        for sample in ["123456789ñX", "12345678€abc", "1234567🔐test", "otpauth:/é?secret=JBSWY3DPEHPK3PXP"] {
+            assert!(validate_totp_input(sample).is_err());
+            assert!(generate_current_totp(sample, 59).is_err());
+        }
+    }
 }
 
 #[cfg(test)]

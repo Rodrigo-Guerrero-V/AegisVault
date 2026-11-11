@@ -99,8 +99,11 @@ fn parse_totp_spec(input: &str) -> VaultResult<ParsedTotpSpec> {
         return Err(VaultError::validation("Semilla TOTP vacía."));
     }
 
-    if input.len() >= 10 && input[..10].eq_ignore_ascii_case("otpauth://") {
-        let rest = &input[10..];
+    if let Some(rest) = input
+        .get(..10)
+        .filter(|prefix| prefix.eq_ignore_ascii_case("otpauth://"))
+        .and_then(|_| input.get(10..))
+    {
         let (authority_and_path, query) = rest
             .split_once('?')
             .ok_or_else(|| VaultError::validation("URI otpauth:// no contiene parámetros."))?;

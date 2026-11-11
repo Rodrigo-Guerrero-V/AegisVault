@@ -31,3 +31,8 @@ Thumbs.db
 .vscode/
 .idea/
 *.log
+
+# Material interno
+aegisvault-handoff/
+RECOVERY_REPORT.md
+README-INSTALACION.md
