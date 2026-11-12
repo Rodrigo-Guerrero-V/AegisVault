@@ -27,6 +27,11 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
       - name: Cache Cargo artifacts
         uses: Swatinem/rust-cache@v2
         with:
@@ -34,6 +39,9 @@ jobs:
 
       - name: Install frontend dependencies
         run: npm ci
+
+      - name: Audit frontend dependencies (npm audit)
+        run: npm audit --audit-level=high
 
       - name: Typecheck TypeScript frontend
         run: npx tsc --noEmit
@@ -43,6 +51,9 @@ jobs:
 
       - name: Lint Rust backend (Clippy)
         run: cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
+
+      - name: Audit Rust dependencies (cargo audit)
+        run: cargo audit --file src-tauri/Cargo.lock
 
       - name: Run Rust unit & security test suite
         run: cargo test --manifest-path src-tauri/Cargo.toml -- --nocapture
