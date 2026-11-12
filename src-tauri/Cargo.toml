@@ -32,7 +32,7 @@ unicode-normalization = "0.1"
 zxcvbn = "3.1"
 
 # Persistencia e identificadores
-rusqlite = { version = "0.33", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 uuid = { version = "1.12", features = ["v4", "serde"] }
 tracing = "0.1"
 
