@@ -1,0 +1,29 @@
+# Dependabot — AegisVault
+# Mantiene actualizadas las dependencias de npm, Cargo y GitHub Actions
+# con un PR por actualización, los lunes, para revisión manual antes de
+# fusionar (nada se fusiona solo: la CI debe estar en verde).
+version: 2
+updates:
+  # Frontend: React + TypeScript + Vite (package.json en la raíz)
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+
+  # Backend: Rust / Tauri (src-tauri/Cargo.toml + Cargo.lock)
+  - package-ecosystem: "cargo"
+    directory: "/src-tauri"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
+
+  # Workflows de CI y release (.github/workflows/)
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+    open-pull-requests-limit: 5
