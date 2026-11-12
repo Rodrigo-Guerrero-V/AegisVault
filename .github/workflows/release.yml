@@ -111,7 +111,7 @@ jobs:
           }
 
       - name: Attest SLSA build provenance for installers and SHA256SUMS.txt
-        uses: actions/attest-build-provenance@v2
+        uses: actions/attest-build-provenance@v4
         with:
           subject-path: "release-assets/*"
 
